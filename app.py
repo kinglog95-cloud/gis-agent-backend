@@ -1,5 +1,5 @@
 from flask import Flask, request, jsonify
-import overpy
+import requests
 import folium
 from geopy.geocoders import Nominatim
 from geopy.exc import GeocoderTimedOut, GeocoderServiceError
@@ -76,6 +76,9 @@ STYLE_MAP = {
 }
 DEFAULT_COLOR = '#3498db'
 
+# Overpass API endpoint
+OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+
 
 # ─────────────────────────────────────────
 # STEP 1 — Geocode place name to coordinates
@@ -100,60 +103,80 @@ def geocode_location(location_str, retries=2):
 
 # ─────────────────────────────────────────
 # STEP 2 — Pull features from OpenStreetMap
+# Uses `requests` directly instead of the outdated `overpy` library,
+# which sends headers that newer Overpass servers reject (HTTP 406).
 # ─────────────────────────────────────────
 def query_osm(lat, lon, radius_meters, category):
     """Query Overpass for features of `category` within radius."""
-    api = overpy.Overpass()
-
-    # If the category isn't in our map, fall back to the amenity tag.
     tag_pairs = CATEGORY_MAP.get(category, [('amenity', category)])
 
     query_parts = []
     for key, value in tag_pairs:
         query_parts.append(
-            f'        node["{key}"="{value}"](around:{radius_meters},{lat},{lon});'
+            f'  node["{key}"="{value}"](around:{radius_meters},{lat},{lon});'
         )
         query_parts.append(
-            f'        way["{key}"="{value}"](around:{radius_meters},{lat},{lon});'
+            f'  way["{key}"="{value}"](around:{radius_meters},{lat},{lon});'
         )
 
-    query = f"""
-    [out:json][timeout:30];
-    (
+    query = f"""[out:json][timeout:30];
+(
 {chr(10).join(query_parts)}
-    );
-    out center;
-    """
+);
+out center;"""
+
+    headers = {
+        'User-Agent': 'gis_agent_v1/1.0 (GIS analysis tool)',
+        'Accept':     'application/json',
+    }
 
     try:
-        result = api.query(query)
+        response = requests.post(
+            OVERPASS_URL,
+            data={'data': query},
+            headers=headers,
+            timeout=60,
+        )
+
+        if response.status_code != 200:
+            print(f"Overpass HTTP {response.status_code}: {response.text[:200]}")
+            return []
+
+        data = response.json()
         features = []
 
-        for node in result.nodes:
-            features.append({
-                'lat':           float(node.lat),
-                'lon':           float(node.lon),
-                'name':          node.tags.get('name:en') or node.tags.get('name', 'Unnamed'),
-                'type':          category,
-                'phone':         node.tags.get('phone', ''),
-                'website':       node.tags.get('website', ''),
-                'opening_hours': node.tags.get('opening_hours', ''),
-            })
+        for element in data.get('elements', []):
+            tags = element.get('tags', {})
 
-        for way in result.ways:
-            if way.center_lat and way.center_lon:
-                features.append({
-                    'lat':           float(way.center_lat),
-                    'lon':           float(way.center_lon),
-                    'name':          way.tags.get('name:en') or way.tags.get('name', 'Unnamed'),
-                    'type':          category,
-                    'phone':         way.tags.get('phone', ''),
-                    'website':       way.tags.get('website', ''),
-                    'opening_hours': way.tags.get('opening_hours', ''),
-                })
+            # Pick coordinates: nodes have lat/lon, ways use the center
+            if element['type'] == 'node':
+                el_lat = element.get('lat')
+                el_lon = element.get('lon')
+            elif element['type'] == 'way':
+                center = element.get('center', {})
+                el_lat = center.get('lat')
+                el_lon = center.get('lon')
+            else:
+                continue
+
+            if el_lat is None or el_lon is None:
+                continue
+
+            features.append({
+                'lat':           float(el_lat),
+                'lon':           float(el_lon),
+                'name':          tags.get('name:en') or tags.get('name', 'Unnamed'),
+                'type':          category,
+                'phone':         tags.get('phone', ''),
+                'website':       tags.get('website', ''),
+                'opening_hours': tags.get('opening_hours', ''),
+            })
 
         return features
 
+    except requests.exceptions.Timeout:
+        print("Overpass error: request timed out")
+        return []
     except Exception as e:
         print(f"Overpass error: {e}")
         return []
