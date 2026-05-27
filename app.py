@@ -13,20 +13,23 @@ app = Flask(__name__)
 # Supermarkets are shop=supermarket, parks are leisure=park,
 # hotels are tourism=hotel, etc. This map routes each
 # category to the correct OSM tag so we don't return 0 results.
+# Hospital/pharmacy also check the newer `healthcare=` schema
+# because many Lebanese facilities use that tagging.
 # ─────────────────────────────────────────
 CATEGORY_MAP = {
-    # amenity tag
+    # health
     'hospital':     [
-            ('amenity', 'hospital'),
-            ('healthcare', 'hospital'),
-            ('amenity', 'clinic'),
-            ('healthcare', 'clinic'),
-        ],
-        'pharmacy':     [
-            ('amenity', 'pharmacy'),
-            ('healthcare', 'pharmacy'),
-            ('shop', 'chemist'),
-        ],
+        ('amenity', 'hospital'),
+        ('healthcare', 'hospital'),
+        ('amenity', 'clinic'),
+        ('healthcare', 'clinic'),
+    ],
+    'pharmacy':     [
+        ('amenity', 'pharmacy'),
+        ('healthcare', 'pharmacy'),
+        ('shop', 'chemist'),
+    ],
+    # amenity tag
     'school':       [('amenity', 'school')],
     'university':   [('amenity', 'university')],
     'library':      [('amenity', 'library')],
@@ -82,7 +85,9 @@ def geocode_location(location_str, retries=2):
     geolocator = Nominatim(user_agent="gis_agent_v1/1.0")
     for attempt in range(retries + 1):
         try:
-            loc = geolocator.geocode(location_str, timeout=10)
+            # language='en' forces Nominatim to return English place names
+            # instead of the local script (Arabic, Cyrillic, etc.).
+            loc = geolocator.geocode(location_str, timeout=10, language='en')
             if loc:
                 return loc.latitude, loc.longitude, loc.address
             return None, None, None
@@ -128,7 +133,7 @@ def query_osm(lat, lon, radius_meters, category):
             features.append({
                 'lat':           float(node.lat),
                 'lon':           float(node.lon),
-                'name':          node.tags.get('name', 'Unnamed'),
+                'name':          node.tags.get('name:en') or node.tags.get('name', 'Unnamed'),
                 'type':          category,
                 'phone':         node.tags.get('phone', ''),
                 'website':       node.tags.get('website', ''),
@@ -140,7 +145,7 @@ def query_osm(lat, lon, radius_meters, category):
                 features.append({
                     'lat':           float(way.center_lat),
                     'lon':           float(way.center_lon),
-                    'name':          way.tags.get('name', 'Unnamed'),
+                    'name':          way.tags.get('name:en') or way.tags.get('name', 'Unnamed'),
                     'type':          category,
                     'phone':         way.tags.get('phone', ''),
                     'website':       way.tags.get('website', ''),
@@ -162,6 +167,12 @@ def generate_map(lat, lon, radius_meters, features, location_name, category):
     m = folium.Map(location=[lat, lon], zoom_start=15, tiles='CartoDB positron')
     color = STYLE_MAP.get(category, DEFAULT_COLOR)
     category_label = category.replace('_', ' ').title()
+    count = len(features)
+
+    # Smart badge: green check for hits, neutral gray info for zero
+    badge_color = '#27ae60' if count > 0 else '#95a5a6'
+    badge_icon  = '✅' if count > 0 else 'ℹ️'
+    plural      = 's' if count != 1 else ''
 
     # Center marker
     folium.Marker(
@@ -230,9 +241,9 @@ def generate_map(lat, lon, radius_meters, features, location_name, category):
         <div style='font-size:13px;color:#555;margin-bottom:12px'>
             📏 {radius_meters / 1000:.1f} km radius
         </div>
-        <div style='background:{color};color:white;border-radius:8px;
+        <div style='background:{badge_color};color:white;border-radius:8px;
                     padding:8px;text-align:center;font-weight:700'>
-            ✅ {len(features)} Found
+            {badge_icon} {count} {category_label}{plural} Found
         </div>
     </div>
     """
