@@ -16,8 +16,17 @@ app = Flask(__name__)
 # ─────────────────────────────────────────
 CATEGORY_MAP = {
     # amenity tag
-    'hospital':     [('amenity', 'hospital')],
-    'pharmacy':     [('amenity', 'pharmacy')],
+'hospital':     [
+        ('amenity', 'hospital'),
+        ('healthcare', 'hospital'),
+        ('amenity', 'clinic'),
+        ('healthcare', 'clinic'),
+    ],
+    'pharmacy':     [
+        ('amenity', 'pharmacy'),
+        ('healthcare', 'pharmacy'),
+        ('shop', 'chemist'),
+    ],
     'school':       [('amenity', 'school')],
     'university':   [('amenity', 'university')],
     'library':      [('amenity', 'library')],
