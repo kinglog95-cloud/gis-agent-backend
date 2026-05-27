@@ -4,3 +4,4 @@ folium==0.17.0
 shapely==2.0.4
 geopy==2.4.1
 gunicorn==22.0.0
+requests==2.32.3
