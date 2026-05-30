@@ -771,22 +771,36 @@ def generate_pdf_report(location_name, category, radius_km, features,
 # ═════════════════════════════════════════
 @app.route('/analyze', methods=['POST'])
 def analyze():
-    data = request.get_json(silent=True) or {}
+    # Detect whether this is a multipart upload or pure JSON
+    is_multipart = request.content_type and request.content_type.startswith('multipart/form-data')
 
-    location    = (data.get('location') or '').strip()
-    category    = data.get('category') or data.get('amenity_type') or 'hospital'
-    include_pdf = bool(data.get('include_pdf', False))
+    if is_multipart:
+        location    = (request.form.get('location') or '').strip()
+        category    = request.form.get('category') or request.form.get('amenity_type') or 'hospital'
+        include_pdf = str(request.form.get('include_pdf', 'false')).lower() in ('true', '1', 'yes')
+        try:
+            radius_km = float(request.form.get('radius_km', 2))
+        except (TypeError, ValueError):
+            radius_km = 2.0
+        uploaded = request.files.get('file')
+        file_bytes = uploaded.read() if uploaded else b''
+        file_name  = uploaded.filename if uploaded else ''
+    else:
+        data = request.get_json(silent=True) or {}
+        location    = (data.get('location') or '').strip()
+        category    = data.get('category') or data.get('amenity_type') or 'hospital'
+        include_pdf = bool(data.get('include_pdf', False))
+        try:
+            radius_km = float(data.get('radius_km', 2))
+        except (TypeError, ValueError):
+            radius_km = 2.0
+        # Legacy base64 path (kept for backward compat)
+        file_b64  = data.get('file_b64') or ''
+        file_name = (data.get('file_name') or '').strip()
+        file_bytes = base64.b64decode(file_b64) if file_b64 else b''
 
-    try:
-        radius_km = float(data.get('radius_km', 2))
-    except (TypeError, ValueError):
-        radius_km = 2.0
     radius_km = max(0.1, min(radius_km, 20.0))
     radius_m  = radius_km * 1000
-
-    # NEW in V2: optional file upload via base64 in the JSON body
-    file_b64  = data.get('file_b64') or ''
-    file_name = (data.get('file_name') or '').strip()
 
     if not location:
         return jsonify({'success': False, 'error': 'No location provided'}), 400
@@ -800,16 +814,12 @@ def analyze():
 
     features = query_osm(lat, lon, radius_m, category)
 
-    # Parse uploaded file if present
     user_gdf     = None
     user_summary = None
-    if file_b64 and file_name:
+    if file_bytes and file_name:
         try:
-            file_bytes = base64.b64decode(file_b64)
-            original_crs_str = 'unknown'
             user_gdf_native = parse_uploaded_file(file_bytes, file_name)
             original_crs_str = str(user_gdf_native.crs) if user_gdf_native.crs else 'unknown'
-            # parse_uploaded_file already reprojects to 4326
             user_gdf = user_gdf_native
             user_summary = summarize_gdf(user_gdf, file_name, original_crs_str)
         except Exception as e:
@@ -829,7 +839,7 @@ def analyze():
         'count':       len(features),
         'features':    features,
         'map_html':    map_html,
-        'file_summary': user_summary,   # None if no file, dict if file (or error)
+        'file_summary': user_summary,
     }
 
     if include_pdf:
