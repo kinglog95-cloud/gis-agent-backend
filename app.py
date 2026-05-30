@@ -410,6 +410,9 @@ def parse_uploaded_file(content_bytes, filename):
     if not content_bytes:
         raise ValueError("Uploaded file is empty")
     size_mb = len(content_bytes) / (1024 * 1024)
+    # DEBUG: log what we received so we can verify base64 decoded correctly
+    print(f"DEBUG upload: filename={filename!r}, bytes={len(content_bytes)}, "
+          f"first_16_hex={content_bytes[:16].hex()}")
     if size_mb > MAX_FILE_SIZE_MB:
         raise ValueError(
             f"File too large ({size_mb:.1f} MB). "
