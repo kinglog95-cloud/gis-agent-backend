@@ -532,70 +532,86 @@ def generate_map(lat, lon, radius_meters, features, location_name, category,
     osm_layer.add_to(m)
 
     # === User-uploaded layer (NEW in V2) ===
+    # === User-uploaded layer (V2 + line-rendering fix) ===
     if user_gdf is not None and len(user_gdf) > 0:
         user_label = (user_filename or 'Your Data').rsplit('.', 1)[0][:40]
         user_layer = folium.FeatureGroup(name=f"📂 {user_label}", show=True)
 
-        # Pick up to 5 attribute columns for the tooltip
-        tooltip_fields = [
-            c for c in user_gdf.columns if c != 'geometry'
-        ][:5]
+        tooltip_fields = [c for c in user_gdf.columns if c != 'geometry'][:5]
 
-        def _style(_):
-            return {
-                'color':       USER_LAYER_COLOR,
-                'weight':      2,
-                'fillColor':   USER_LAYER_FILL,
-                'fillOpacity': 0.35,
-            }
+        def _build_popup(row):
+            lines = []
+            for c in tooltip_fields:
+                val = row.get(c, '')
+                if val is not None and str(val).strip() and str(val) != 'nan':
+                    lines.append(f"<b>{c}:</b> {val}")
+            return ("<div style='font-family:Arial;min-width:140px'>"
+                    + "<br>".join(lines) + "</div>") if lines else None
 
-        # For point layers, render as circle markers (cleaner than pins)
-        is_point_layer = all(
-            t in ('Point', 'MultiPoint')
-            for t in user_gdf.geometry.geom_type.dropna().unique()
-        )
+        # Split geometries by type — each renders with its own style
+        for _, row in user_gdf.iterrows():
+            geom = row.geometry
+            if geom is None or geom.is_empty:
+                continue
 
-        if is_point_layer:
-            for _, row in user_gdf.iterrows():
-                pt = row.geometry
-                if pt is None or pt.is_empty:
-                    continue
-                # Use centroid for MultiPoint
-                p = pt if pt.geom_type == 'Point' else pt.centroid
-                popup_lines = []
-                for c in tooltip_fields:
-                    val = row.get(c, '')
-                    if val is not None and str(val).strip() and str(val) != 'nan':
-                        popup_lines.append(f"<b>{c}:</b> {val}")
-                popup_html = ("<div style='font-family:Arial;min-width:140px'>"
-                              + "<br>".join(popup_lines) + "</div>") \
-                              if popup_lines else None
-                folium.CircleMarker(
-                    [p.y, p.x],
-                    radius=7,
-                    color=USER_LAYER_COLOR,
-                    fill=True, fill_color=USER_LAYER_FILL, fill_opacity=0.7,
-                    popup=folium.Popup(popup_html, max_width=240) if popup_html else None,
-                ).add_to(user_layer)
-        else:
-            try:
-                gj = folium.GeoJson(
-                    data=user_gdf.__geo_interface__,
-                    style_function=_style,
-                    tooltip=folium.GeoJsonTooltip(fields=tooltip_fields)
-                            if tooltip_fields else None,
-                )
-                gj.add_to(user_layer)
-            except Exception as e:
-                print(f"User layer render error: {e}")
+            gt = geom.geom_type
+            popup_html = _build_popup(row)
+            popup = folium.Popup(popup_html, max_width=260) if popup_html else None
+
+            # POINTS — small filled circles
+            if gt in ('Point', 'MultiPoint'):
+                pts = [geom] if gt == 'Point' else list(geom.geoms)
+                for p in pts:
+                    folium.CircleMarker(
+                        [p.y, p.x],
+                        radius=7,
+                        color=USER_LAYER_COLOR,
+                        fill=True, fill_color=USER_LAYER_FILL, fill_opacity=0.7,
+                        popup=popup,
+                    ).add_to(user_layer)
+
+            # LINES — visible strokes, no fill
+            elif gt in ('LineString', 'MultiLineString'):
+                lines = [geom] if gt == 'LineString' else list(geom.geoms)
+                for ln in lines:
+                    coords = [(y, x) for x, y in ln.coords]  # folium wants [lat, lon]
+                    folium.PolyLine(
+                        coords,
+                        color=USER_LAYER_COLOR,
+                        weight=4,
+                        opacity=0.85,
+                        popup=popup,
+                    ).add_to(user_layer)
+
+            # POLYGONS — outlined, semi-transparent fill
+            elif gt in ('Polygon', 'MultiPolygon'):
+                polys = [geom] if gt == 'Polygon' else list(geom.geoms)
+                for poly in polys:
+                    exterior = [(y, x) for x, y in poly.exterior.coords]
+                    holes = [
+                        [(y, x) for x, y in ring.coords]
+                        for ring in poly.interiors
+                    ]
+                    folium.Polygon(
+                        locations=[exterior] + holes if holes else exterior,
+                        color=USER_LAYER_COLOR,
+                        weight=2,
+                        fill=True,
+                        fill_color=USER_LAYER_FILL,
+                        fill_opacity=0.35,
+                        popup=popup,
+                    ).add_to(user_layer)
+
+            # Anything else (GeometryCollection, etc.) — log and skip
+            else:
+                print(f"User layer: unsupported geometry type {gt}, skipped")
 
         user_layer.add_to(m)
 
         # Fit map bounds to include user layer + radius circle
         try:
             minx, miny, maxx, maxy = user_gdf.total_bounds
-            # Combine with rough radius bbox (degrees, very approximate but enough)
-            deg = radius_meters / 111000.0  # ~111km per degree latitude
+            deg = radius_meters / 111000.0
             minx = min(minx, lon - deg)
             maxx = max(maxx, lon + deg)
             miny = min(miny, lat - deg)
