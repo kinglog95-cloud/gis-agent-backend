@@ -324,13 +324,50 @@ def _parse_shapefile_zip(content_bytes):
 
 
 def _parse_kml_bytes(kml_bytes):
+    """Read raw KML bytes. Reads ALL layers (a KML can have many) and merges them."""
+    import warnings
     with tempfile.NamedTemporaryFile(suffix='.kml', delete=False) as tmp:
         tmp.write(kml_bytes)
         tmp_path = tmp.name
     try:
-        gdf = gpd.read_file(tmp_path)
+        # Discover all layers in the KML
+        try:
+            import pyogrio
+            layer_info = pyogrio.list_layers(tmp_path)
+            # list_layers returns ndarray of [name, geometry_type] rows
+            layer_names = [row[0] for row in layer_info]
+        except Exception:
+            layer_names = [None]  # fall back: let geopandas pick default
+
+        if not layer_names:
+            layer_names = [None]
+
+        all_gdfs = []
+        for ln in layer_names:
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    g = gpd.read_file(tmp_path, layer=ln) if ln else gpd.read_file(tmp_path)
+                if g is not None and len(g) > 0:
+                    all_gdfs.append(g)
+            except Exception as e:
+                print(f"KML layer {ln!r} read error: {e}")
+
+        if not all_gdfs:
+            raise ValueError("Could not read any layer from the KML")
+
+        # Concatenate; align columns; KML is always WGS84 by spec
+        if len(all_gdfs) == 1:
+            gdf = all_gdfs[0]
+        else:
+            gdf = gpd.GeoDataFrame(
+                pd.concat(all_gdfs, ignore_index=True, sort=False),
+                crs=all_gdfs[0].crs or 'EPSG:4326',
+            )
+
         if gdf.crs is None:
             gdf.set_crs(epsg=4326, inplace=True, allow_override=True)
+        print(f"KML: combined {len(all_gdfs)} layer(s), {len(gdf)} features total")
         return gdf
     finally:
         try:
@@ -492,14 +529,14 @@ def _render_one_feature_to_layer(geom, popup, layer):
             ).add_to(layer)
 
     elif gt == 'LineString':
-        coords = [(y, x) for x, y in geom.coords]
+        coords = [(c[1], c[0]) for c in geom.coords]
         folium.PolyLine(
             coords, color=USER_LAYER_COLOR, weight=4, opacity=0.85, popup=popup,
         ).add_to(layer)
 
     elif gt == 'MultiLineString':
         for ln in geom.geoms:
-            coords = [(y, x) for x, y in ln.coords]
+            coords = [(c[1], c[0]) for c in ln.coords]
             folium.PolyLine(
                 coords, color=USER_LAYER_COLOR, weight=4, opacity=0.85,
                 popup=popup,
@@ -517,9 +554,9 @@ def _render_one_feature_to_layer(geom, popup, layer):
 
 
 def _add_polygon(poly, popup, layer):
-    exterior = [(y, x) for x, y in poly.exterior.coords]
+    exterior = [(c[1], c[0]) for c in poly.exterior.coords]   # ignore Z if present
     holes = [
-        [(y, x) for x, y in ring.coords]
+        [(c[1], c[0]) for c in ring.coords]
         for ring in poly.interiors
     ]
     if holes:
