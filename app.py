@@ -758,7 +758,8 @@ def _add_polygon(poly, popup, layer):
 # STEP 5 — Build the interactive map
 # ═════════════════════════════════════════
 def generate_map(lat, lon, radius_meters, features, location_name, category,
-                 user_gdf=None, user_filename=None, exposure=None, notice=None):
+                 user_gdf=None, user_filename=None, exposure=None, notice=None,
+                 boundary=None):
     m = folium.Map(location=[lat, lon], zoom_start=15, tiles='CartoDB positron')
     color = STYLE_MAP.get(category, DEFAULT_COLOR)
     category_label = category.replace('_', ' ').title()
@@ -767,6 +768,34 @@ def generate_map(lat, lon, radius_meters, features, location_name, category,
     badge_color = '#27ae60' if count > 0 else '#95a5a6'
     badge_icon  = '✅' if count > 0 else 'ℹ️'
     plural      = 's' if count != 1 else ''
+
+    is_boundary = boundary is not None
+    # ── Boundary mode: draw the district polygons first (outlined, light
+    #    fill), then color points inside/outside. ──
+    if is_boundary:
+        b_gdf = boundary.get('_boundary_gdf')
+        if b_gdf is not None and len(b_gdf) > 0:
+            bnd_layer = folium.FeatureGroup(name="🗺️ District boundary", show=True)
+            per_poly = {p['index']: p for p in boundary.get('per_polygon', [])}
+            for bi in range(len(b_gdf)):
+                geom = b_gdf.geometry.iloc[bi]
+                if geom is None or geom.is_empty:
+                    continue
+                info = per_poly.get(bi, {})
+                tip = (f"{info.get('name', 'Area ' + str(bi + 1))}: "
+                       f"{info.get('count', 0)} {category_label.lower()}"
+                       f"{'s' if info.get('count', 0) != 1 else ''} · "
+                       f"{info.get('area', {}).get('km2', 0)} km² · "
+                       f"{info.get('density', 0)}/km²")
+                folium.GeoJson(
+                    geom.__geo_interface__,
+                    style_function=lambda _: {
+                        'fillColor': '#1f6feb', 'color': '#1f6feb',
+                        'weight': 2, 'fillOpacity': 0.07,
+                    },
+                    tooltip=tip,
+                ).add_to(bnd_layer)
+            bnd_layer.add_to(m)
 
     # ── Exposure mode: draw the comparison lines + buffer zone first
     #    (so points sit on top), then color points red/green by exposure. ──
@@ -847,6 +876,13 @@ def generate_map(lat, lon, radius_meters, features, location_name, category,
                 and len(tagged) == len(features):
             exposure_tags = list(tagged['exposure'])
 
+    # Boundary mode: inside/outside tag per feature (by position)
+    boundary_tags = None
+    if is_boundary:
+        bt = boundary.get('_points_gdf')
+        if bt is not None and 'within' in bt.columns and len(bt) == len(features):
+            boundary_tags = list(bt['within'])
+
     for i, f in enumerate(features):
         parts = [
             f"<b>{f['name']}</b><br>",
@@ -858,6 +894,12 @@ def generate_map(lat, lon, radius_meters, features, location_name, category,
             pt_color = '#e74c3c' if tag == 'exposed' else '#27ae60'
             tag_label = ('🔴 Exposed (within %dm)' % exposure['within_m']
                          if tag == 'exposed' else '🟢 Shielded')
+            parts.append(f"<br><b style='color:{pt_color}'>{tag_label}</b>")
+        elif boundary_tags is not None:
+            tag = boundary_tags[i]
+            pt_color = '#1f6feb' if tag == 'inside' else '#b0b6c0'
+            tag_label = ('🔵 Inside district' if tag == 'inside'
+                         else '⚪ Outside district')
             parts.append(f"<br><b style='color:{pt_color}'>{tag_label}</b>")
         else:
             pt_color = color
@@ -873,10 +915,16 @@ def generate_map(lat, lon, radius_meters, features, location_name, category,
             "<div style='font-family:Arial;min-width:160px'>"
             + ''.join(parts) + "</div>"
         )
+        # Points outside the district are drawn smaller + faded
+        pt_radius = 9
+        pt_opacity = 0.85
+        if boundary_tags is not None and boundary_tags[i] == 'outside':
+            pt_radius = 5
+            pt_opacity = 0.5
         folium.CircleMarker(
             [f['lat'], f['lon']],
-            radius=9,
-            color=pt_color, fill=True, fill_color=pt_color, fill_opacity=0.85,
+            radius=pt_radius,
+            color=pt_color, fill=True, fill_color=pt_color, fill_opacity=pt_opacity,
             popup=folium.Popup(popup_html, max_width=260),
             tooltip=f['name'],
         ).add_to(osm_layer)
@@ -998,6 +1046,37 @@ def generate_map(lat, lon, radius_meters, features, location_name, category,
         </div>
         """
         accent = '#1a1a2e'
+    elif is_boundary:
+        # Per-polygon rows (cap at 6 for the overlay; full list in PDF)
+        rows = ""
+        for p in boundary.get('per_polygon', [])[:6]:
+            rows += (
+                f"<div style='display:flex;justify-content:space-between;"
+                f"margin-bottom:2px'><span style='max-width:150px;"
+                f"overflow:hidden;text-overflow:ellipsis;white-space:nowrap'>"
+                f"🔵 {p['name']}</span>"
+                f"<span>{p['count']} · {p['density']}/km²</span></div>"
+            )
+        more = boundary['polygon_count'] - 6
+        if more > 0:
+            rows += (f"<div style='color:#aab;font-size:11px'>"
+                     f"+ {more} more area(s)</div>")
+        badge_html = f"""
+        <div style='background:#1a1a2e;color:white;border-radius:8px;
+                    padding:10px 12px;font-weight:600;font-size:12.5px'>
+            <div style='margin-bottom:6px'>
+                {boundary['total_inside']} of {boundary['total_points']}
+                {category_label}{plural} inside
+            </div>
+            {rows}
+            <div style='border-top:1px solid #3a4156;margin-top:7px;
+                        padding-top:6px;font-weight:400;font-size:11px;color:#aab'>
+                {boundary['polygon_count']} area(s) · {boundary['total_area']['km2']} km²
+                · {boundary['overall_density']}/km² overall
+            </div>
+        </div>
+        """
+        accent = '#1a1a2e'
     else:
         badge_html = f"""
         <div style='background:{badge_color};color:white;border-radius:8px;
@@ -1007,12 +1086,13 @@ def generate_map(lat, lon, radius_meters, features, location_name, category,
         """
         accent = color
 
-    search_line = (
-        f"📏 within {int(exposure['within_m'])} m of "
-        f"{exposure['line_category'].replace('_', ' ')}"
-        if is_exposure else
-        f"📏 {radius_meters / 1000:.1f} km radius"
-    )
+    if is_exposure:
+        search_line = (f"📏 within {int(exposure['within_m'])} m of "
+                       f"{exposure['line_category'].replace('_', ' ')}")
+    elif is_boundary:
+        search_line = f"🗺️ within district boundary"
+    else:
+        search_line = f"📏 {radius_meters / 1000:.1f} km radius"
 
     notice_html = ""
     if notice:
@@ -1226,6 +1306,111 @@ def proximity_exposure_analysis(lat, lon, radius_m, point_category,
     }
 
 
+def within_boundary_analysis(lat, lon, radius_m, point_category,
+                             boundary_gdf, prefetched_points=None):
+    """V3.6 — count features of `point_category` that fall INSIDE each polygon
+    of `boundary_gdf` (a user-uploaded district/area boundary).
+
+    Per-polygon counts + area + density, plus a combined total. Points are
+    tagged 'inside'/'outside'. Returns a dict + GeoDataFrames for rendering.
+    """
+    # 1. Points (reuse if caller already fetched them)
+    point_feats = (prefetched_points if prefetched_points is not None
+                   else query_osm(lat, lon, radius_m, point_category))
+    points_gdf = _points_to_gdf(point_feats)
+
+    # 2. Keep only polygon geometries from the uploaded boundary
+    if boundary_gdf is None or len(boundary_gdf) == 0:
+        return None
+    try:
+        poly_mask = boundary_gdf.geometry.geom_type.isin(['Polygon', 'MultiPolygon'])
+        polys = boundary_gdf[poly_mask].copy().reset_index(drop=True)
+    except Exception as e:
+        print(f"within_boundary: polygon filter failed: {e}")
+        return None
+    if len(polys) == 0:
+        return {'boundary_has_no_polygons': True}
+
+    # 3. Metric CRS for accurate areas
+    metric_epsg = pick_metric_crs(lat, lon)
+    polys_metric = polys.to_crs(epsg=metric_epsg)
+
+    # Try to find a human-readable name column for each polygon
+    name_col = None
+    for cand in ('name', 'Name', 'NAME', 'district', 'District', 'DISTRICT',
+                 'NAME_EN', 'name_en', 'ADM3_EN', 'label', 'Label'):
+        if cand in polys.columns:
+            name_col = cand
+            break
+
+    # 4. Per-polygon: count points inside, compute area + density
+    per_polygon = []
+    if len(points_gdf) > 0:
+        pts_for_test = points_gdf.geometry
+    else:
+        pts_for_test = None
+
+    # Tag each point with the index of the polygon it falls in (-1 = outside)
+    point_tags = [-1] * len(points_gdf)
+
+    for pi in range(len(polys)):
+        poly_geom = polys.geometry.iloc[pi]
+        area_m2 = float(polys_metric.geometry.iloc[pi].area)
+        inside_names = []
+        count_in = 0
+        if pts_for_test is not None:
+            try:
+                mask = pts_for_test.within(poly_geom)
+                for idx_pos, is_in in enumerate(mask.tolist()):
+                    if is_in and point_tags[idx_pos] == -1:
+                        point_tags[idx_pos] = pi
+                        count_in += 1
+                        nm = points_gdf.iloc[idx_pos].get('name', 'Unnamed')
+                        inside_names.append(nm)
+            except Exception as e:
+                print(f"within_boundary: point test failed for poly {pi}: {e}")
+        area_units = compute_area_units(area_m2)
+        density = round(count_in / area_units['km2'], 2) if area_units['km2'] > 0 else 0.0
+        label = None
+        if name_col is not None:
+            try:
+                label = str(polys.iloc[pi][name_col])
+            except Exception:
+                label = None
+        per_polygon.append({
+            'index':    pi,
+            'name':     label or f"Area {pi + 1}",
+            'count':    count_in,
+            'area':     area_units,
+            'density':  density,    # features per km²
+        })
+
+    total_inside = sum(p['count'] for p in per_polygon)
+    total_outside = len(points_gdf) - total_inside
+    total_area_m2 = float(polys_metric.geometry.area.sum())
+
+    # Build a tagged points gdf for rendering (inside/outside)
+    tagged_points = points_gdf.copy()
+    if len(tagged_points) > 0:
+        tagged_points['within'] = ['inside' if t >= 0 else 'outside'
+                                   for t in point_tags]
+
+    return {
+        'point_category':  point_category,
+        'polygon_count':   int(len(polys)),
+        'total_points':    int(len(points_gdf)),
+        'total_inside':    int(total_inside),
+        'total_outside':   int(total_outside),
+        'total_area':      compute_area_units(total_area_m2),
+        'overall_density': round(total_inside / compute_area_units(total_area_m2)['km2'], 2)
+                           if compute_area_units(total_area_m2)['km2'] > 0 else 0.0,
+        'per_polygon':     per_polygon,
+        # GeoDataFrames for rendering:
+        '_points_gdf':     tagged_points,
+        '_boundary_gdf':   polys,   # WGS84 polygons
+    }
+
+
 # ═════════════════════════════════════════
 # STEP 6 (NEW in V2.5) — Static cartographic map
 # Print-quality PNG with basemap, OSM features, user layer,
@@ -1233,7 +1418,7 @@ def proximity_exposure_analysis(lat, lon, radius_m, point_category,
 # Returns a path to a temp PNG (caller must delete after use).
 # ═════════════════════════════════════════
 def generate_static_map(lat, lon, radius_meters, features, location_name,
-                        category, user_gdf=None, exposure=None):
+                        category, user_gdf=None, exposure=None, boundary=None):
     """Render a print-quality static map. Returns a temp PNG path."""
     import math
     import matplotlib
@@ -1247,6 +1432,7 @@ def generate_static_map(lat, lon, radius_meters, features, location_name,
     from shapely.ops import transform as shapely_transform
 
     is_exposure = exposure is not None
+    is_boundary = boundary is not None
 
     # WGS84 → Web Mercator (for plotting alongside basemap tiles)
     to_3857 = Transformer.from_crs("EPSG:4326", "EPSG:3857",
@@ -1294,6 +1480,19 @@ def generate_static_map(lat, lon, radius_meters, features, location_name,
                 bxmax = max(bxmax, lxmax); bymax = max(bymax, lymax)
         except Exception as e:
             print(f"Static map: exposure layer reprojection failed: {e}")
+
+    # Pre-project boundary polygons (V3.6) and expand bounds to fit them
+    bnd_3857 = None
+    if is_boundary:
+        try:
+            bg = boundary.get('_boundary_gdf')
+            if bg is not None and len(bg) > 0:
+                bnd_3857 = bg.to_crs(epsg=3857)
+                pxmin, pymin, pxmax, pymax = bnd_3857.total_bounds
+                bxmin = min(bxmin, pxmin); bymin = min(bymin, pymin)
+                bxmax = max(bxmax, pxmax); bymax = max(bymax, pymax)
+        except Exception as e:
+            print(f"Static map: boundary reprojection failed: {e}")
 
     # Padding + maintain a reasonable aspect (close to STATIC_MAP_W/H)
     width  = bxmax - bxmin
@@ -1346,6 +1545,14 @@ def generate_static_map(lat, lon, radius_meters, features, location_name,
             except Exception as e:
                 print(f"Static map: lines plot failed: {e}")
 
+    # Boundary polygons (V3.6) — outlined, light fill
+    if is_boundary and bnd_3857 is not None:
+        try:
+            bnd_3857.plot(ax=ax, facecolor='#1f6feb', alpha=0.07,
+                          edgecolor='#1f6feb', linewidth=1.8, zorder=2)
+        except Exception as e:
+            print(f"Static map: boundary plot failed: {e}")
+
     # User uploaded layer (per geometry type — same color scheme as web map)
     if user_gdf is not None and len(user_gdf) > 0:
         try:
@@ -1380,6 +1587,13 @@ def generate_static_map(lat, lon, radius_meters, features, location_name,
                 and len(tagged) == len(features):
             exposure_tags = list(tagged['exposure'])
 
+    # Boundary inside/outside lookup by position
+    boundary_tags = None
+    if is_boundary:
+        bt = boundary.get('_points_gdf')
+        if bt is not None and 'within' in bt.columns and len(bt) == len(features):
+            boundary_tags = list(bt['within'])
+
     if features:
         if exposure_tags is not None:
             # Two scatter calls: exposed (red) and shielded (green)
@@ -1395,6 +1609,21 @@ def generate_static_map(lat, lon, radius_meters, features, location_name,
                            edgecolor='white', linewidth=1.2, zorder=6)
             if ex_x:
                 ax.scatter(ex_x, ex_y, c='#e74c3c', s=60, alpha=0.9,
+                           edgecolor='white', linewidth=1.2, zorder=7)
+        elif boundary_tags is not None:
+            # Inside (blue, prominent) vs outside (grey, faded/small)
+            in_x, in_y, out_x, out_y = [], [], [], []
+            for f, tag in zip(features, boundary_tags):
+                x, y = to_3857(f['lon'], f['lat'])
+                if tag == 'inside':
+                    in_x.append(x); in_y.append(y)
+                else:
+                    out_x.append(x); out_y.append(y)
+            if out_x:
+                ax.scatter(out_x, out_y, c='#b0b6c0', s=28, alpha=0.55,
+                           edgecolor='white', linewidth=0.8, zorder=6)
+            if in_x:
+                ax.scatter(in_x, in_y, c='#1f6feb', s=62, alpha=0.92,
                            edgecolor='white', linewidth=1.2, zorder=7)
         else:
             fx, fy = [], []
@@ -1466,6 +1695,23 @@ def generate_static_map(lat, lon, radius_meters, features, location_name,
                    markersize=10, markeredgewidth=1.5),
             Line2D([0], [0], color='#34404f', lw=2.2, label=line_label),
         ]
+    elif is_boundary:
+        legend_items = [
+            Line2D([0], [0], marker='v', color='w', label='Query center',
+                   markerfacecolor='#e74c3c', markeredgecolor='white',
+                   markersize=11, markeredgewidth=1.5),
+            Line2D([0], [0], marker='o', color='w',
+                   label=f'{category_label} — inside',
+                   markerfacecolor='#1f6feb', markeredgecolor='white',
+                   markersize=10, markeredgewidth=1.5),
+            Line2D([0], [0], marker='o', color='w',
+                   label=f'{category_label} — outside',
+                   markerfacecolor='#b0b6c0', markeredgecolor='white',
+                   markersize=8, markeredgewidth=1.0),
+            Line2D([0], [0], marker='s', color='w', label='District boundary',
+                   markerfacecolor='none', markeredgecolor='#1f6feb',
+                   markersize=11, markeredgewidth=1.8),
+        ]
     else:
         legend_items = [
             Line2D([0], [0], marker='v', color='w', label='Query center',
@@ -1493,6 +1739,11 @@ def generate_static_map(lat, lon, radius_meters, features, location_name,
         title_text = (
             f"{category_label} within {int(exposure['within_m'])} m of "
             f"{line_label} — {location_name[:60]}"
+        )
+    elif is_boundary:
+        title_text = (
+            f"{category_label} within district boundary "
+            f"({boundary['polygon_count']} area(s)) — {location_name[:55]}"
         )
     else:
         title_text = (
@@ -1565,7 +1816,7 @@ def _shape_arabic(text):
 
 def generate_pdf_report(location_name, category, radius_km, features,
                         user_summary=None, static_map_path=None, exposure=None,
-                        notice=None):
+                        notice=None, boundary=None):
     category_label = category.replace('_', ' ').title()
     count = len(features)
 
@@ -1692,7 +1943,57 @@ def generate_pdf_report(location_name, category, radius_km, features,
             pdf.multi_cell(0, 6, _latin1(value),
                            new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
-    if user_summary and 'error' not in user_summary:
+    # ── Within-boundary analysis block (V3.6) ──
+    if boundary is not None and not boundary.get('boundary_has_no_polygons'):
+        pdf.ln(2)
+        pdf.set_font("Helvetica", "B", 11)
+        pdf.set_text_color(*BRAND_ACCENT)
+        pdf.cell(0, 7, _latin1("Within-Boundary Analysis"),
+                 new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        pdf.set_text_color(40, 40, 40)
+        bnd_rows = [
+            ("Areas analysed",  f"{boundary['polygon_count']}"),
+            ("Total inside",    f"{boundary['total_inside']} of "
+                                f"{boundary['total_points']} {category_label.lower()}"),
+            ("Outside areas",   f"{boundary['total_outside']}"),
+            ("Combined area",   f"{boundary['total_area']['km2']} km²  "
+                                f"({boundary['total_area']['ha']} ha)"),
+            ("Overall density", f"{boundary['overall_density']} per km²"),
+        ]
+        for label, value in bnd_rows:
+            pdf.set_font("Helvetica", "B", 10)
+            pdf.cell(45, 6, _latin1(label + ":"))
+            pdf.set_font("Helvetica", "", 10)
+            pdf.multi_cell(0, 6, _latin1(value),
+                           new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+
+        # Per-polygon breakdown table
+        pdf.ln(2)
+        pdf.set_font("Helvetica", "B", 9)
+        pdf.set_fill_color(*BRAND_NAVY)
+        pdf.set_text_color(255, 255, 255)
+        pdf.cell(75, 7, _latin1("Area"), fill=True)
+        pdf.cell(30, 7, _latin1("Count"), fill=True)
+        pdf.cell(35, 7, _latin1("Area (km2)"), fill=True)
+        pdf.cell(0, 7, _latin1("Density /km2"), fill=True,
+                 new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        pdf.set_text_color(40, 40, 40)
+        bfill = False
+        for p in boundary.get('per_polygon', []):
+            pdf.set_fill_color(245, 247, 250) if bfill else pdf.set_fill_color(255, 255, 255)
+            pname = str(p['name'])[:38]
+            if arabic_ok and _has_arabic(pname):
+                pdf.set_font("NotoArabic", "", 9)
+                pdf.cell(75, 6, _shape_arabic(pname), fill=True)
+            else:
+                pdf.set_font("Helvetica", "", 8)
+                pdf.cell(75, 6, _latin1(pname), fill=True)
+            pdf.set_font("Helvetica", "", 8)
+            pdf.cell(30, 6, str(p['count']), fill=True)
+            pdf.cell(35, 6, f"{p['area']['km2']}", fill=True)
+            pdf.cell(0, 6, f"{p['density']}", fill=True,
+                     new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+            bfill = not bfill
         pdf.ln(2)
         pdf.set_font("Helvetica", "B", 11)
         pdf.set_text_color(*BRAND_ACCENT)
@@ -1733,16 +2034,23 @@ def generate_pdf_report(location_name, category, radius_km, features,
             "No features were found in this area for the selected category."))
         return base64.b64encode(bytes(pdf.output())).decode("utf-8")
 
-    # Build a per-feature exposure-tag list (aligned by position) if available
+    # Build a per-feature status-tag list (aligned by position) if available
     table_tags = None
+    status_mode = None   # 'exposure' or 'boundary'
     if exposure is not None:
         tg = exposure.get('_points_gdf')
         if tg is not None and 'exposure' in tg.columns and len(tg) == len(features):
             table_tags = list(tg['exposure'])
+            status_mode = 'exposure'
+    elif boundary is not None:
+        bt = boundary.get('_points_gdf')
+        if bt is not None and 'within' in bt.columns and len(bt) == len(features):
+            table_tags = list(bt['within'])
+            status_mode = 'boundary'
 
     show_status = table_tags is not None
 
-    # Table header — Status column replaces Phone in exposure mode
+    # Table header — Status column replaces Phone in exposure/boundary mode
     pdf.set_font("Helvetica", "B", 9)
     pdf.set_fill_color(*BRAND_NAVY)
     pdf.set_text_color(255, 255, 255)
@@ -1773,15 +2081,23 @@ def generate_pdf_report(location_name, category, radius_km, features,
         else:
             pdf.cell(85, 6, _latin1(name), fill=True)
 
-        # Status (exposure) or Phone
+        # Status (exposure / boundary) or Phone
         if show_status:
             tag = table_tags[i - 1]
-            if tag == 'exposed':
-                pdf.set_text_color(192, 57, 43)
-                pdf.cell(45, 6, _latin1("Exposed"), fill=True)
-            else:
-                pdf.set_text_color(39, 174, 96)
-                pdf.cell(45, 6, _latin1("Shielded"), fill=True)
+            if status_mode == 'exposure':
+                if tag == 'exposed':
+                    pdf.set_text_color(192, 57, 43)
+                    pdf.cell(45, 6, _latin1("Exposed"), fill=True)
+                else:
+                    pdf.set_text_color(39, 174, 96)
+                    pdf.cell(45, 6, _latin1("Shielded"), fill=True)
+            else:  # boundary
+                if tag == 'inside':
+                    pdf.set_text_color(31, 111, 235)
+                    pdf.cell(45, 6, _latin1("Inside"), fill=True)
+                else:
+                    pdf.set_text_color(140, 146, 160)
+                    pdf.cell(45, 6, _latin1("Outside"), fill=True)
             pdf.set_text_color(40, 40, 40)
         else:
             phone = f.get('phone', '') or '-'
@@ -1822,6 +2138,7 @@ def analyze():
         except (TypeError, ValueError):
             within_m = 500.0
         country = (request.form.get('country') or '').strip() or None
+        analysis_type = (request.form.get('analysis_type') or '').strip().lstrip('=').strip().lower()
         uploaded = request.files.get('file')
         file_bytes = uploaded.read() if uploaded else b''
         file_name  = uploaded.filename if uploaded else ''
@@ -1840,6 +2157,7 @@ def analyze():
         except (TypeError, ValueError):
             within_m = 500.0
         country = (data.get('country') or '').strip() or None
+        analysis_type = (data.get('analysis_type') or '').strip().lower()
         file_b64  = data.get('file_b64') or ''
         file_name = (data.get('file_name') or '').strip()
         file_bytes = base64.b64decode(file_b64) if file_b64 else b''
@@ -1859,10 +2177,31 @@ def analyze():
 
     features = query_osm(lat, lon, radius_m, category)
 
-    # ── Exposure analysis (V3.5b) — only when a comparison layer is given ──
+    # Parse uploaded file early — it may be the boundary for within-boundary mode
+    user_gdf     = None
+    user_summary = None
+    if file_bytes and file_name:
+        try:
+            user_gdf_native = parse_uploaded_file(file_bytes, file_name)
+            original_crs_str = str(user_gdf_native.crs) if user_gdf_native.crs else 'unknown'
+            user_gdf = user_gdf_native
+            user_summary = summarize_gdf(user_gdf, file_name, original_crs_str)
+        except Exception as e:
+            print(f"File ingestion error ({file_name}): {e}")
+            user_summary = {'filename': file_name, 'error': str(e)}
+
+    # Decide which analysis to run. Explicit analysis_type wins; otherwise infer.
     exposure = None
+    boundary = None
     notice = None
-    if compare_against:
+
+    want_boundary = (analysis_type in ('within-boundary', 'within_boundary',
+                                       'boundary', 'within boundary'))
+    want_exposure = (analysis_type in ('exposure', 'proximity-exposure')
+                     or (not analysis_type and bool(compare_against)))
+
+    # ── Exposure analysis (V3.5b) ──
+    if want_exposure and compare_against:
         within_m = max(10.0, min(within_m, 5000.0))   # sane bounds
         try:
             exposure = proximity_exposure_analysis(
@@ -1877,38 +2216,52 @@ def analyze():
             notice = ("Exposure analysis could not be completed due to an "
                       "internal error. Showing locations only — please retry.")
 
-        # Road fetch failed across all mirrors → don't present a misleading
-        # "0% exposed". Fall back to a plain proximity map + honest notice.
         if exposure is not None and exposure.get('road_fetch_failed'):
             line_label = compare_against.replace('_', ' ')
             notice = (f"Road data for '{line_label}' could not be retrieved "
                       f"(mapping server timed out). Showing locations only — "
                       f"please retry in a moment for the exposure analysis.")
             exposure = None
-        # Genuine data gap: fetch worked but the area has no such roads in OSM
         elif exposure is not None and exposure.get('road_count', 0) == 0:
             line_label = compare_against.replace('_', ' ')
             notice = (f"No {line_label} found in this area in OpenStreetMap. "
                       f"All locations are shown as shielded; real exposure may "
                       f"be higher if road data is incomplete here.")
 
-    user_gdf     = None
-    user_summary = None
-    if file_bytes and file_name:
-        try:
-            user_gdf_native = parse_uploaded_file(file_bytes, file_name)
-            original_crs_str = str(user_gdf_native.crs) if user_gdf_native.crs else 'unknown'
-            user_gdf = user_gdf_native
-            user_summary = summarize_gdf(user_gdf, file_name, original_crs_str)
-        except Exception as e:
-            print(f"File ingestion error ({file_name}): {e}")
-            user_summary = {'filename': file_name, 'error': str(e)}
+    # ── Within-boundary analysis (V3.6) ──
+    elif want_boundary:
+        if user_gdf is None or len(user_gdf) == 0:
+            notice = ("Within-boundary analysis needs a polygon file. Upload a "
+                      "district/area boundary (GeoJSON, Shapefile .zip, or KML) "
+                      "and try again. Showing locations only.")
+        else:
+            try:
+                boundary = within_boundary_analysis(
+                    lat, lon, radius_m, category, user_gdf,
+                    prefetched_points=features,
+                )
+            except Exception as e:
+                import traceback
+                print(f"Boundary analysis failed: {e}")
+                traceback.print_exc()
+                boundary = None
+                notice = ("Within-boundary analysis could not be completed due "
+                          "to an internal error. Showing locations only.")
+            if boundary is not None and boundary.get('boundary_has_no_polygons'):
+                notice = ("The uploaded file has no polygon (area) geometry — "
+                          "within-boundary analysis needs polygons, not points "
+                          "or lines. Showing locations only.")
+                boundary = None
+            # When boundary mode is active, don't also overlay the raw user_gdf
+            # (the boundary IS that file, rendered as the district outline).
+            if boundary is not None:
+                user_gdf = None
 
     try:
         map_html = generate_map(
             lat, lon, radius_m, features, location, category,
             user_gdf=user_gdf, user_filename=file_name or None,
-            exposure=exposure, notice=notice,
+            exposure=exposure, notice=notice, boundary=boundary,
         )
     except Exception as e:
         # Last-resort fallback: render the map WITHOUT the user layer rather than 500
@@ -1917,7 +2270,8 @@ def analyze():
         traceback.print_exc()
         map_html = generate_map(
             lat, lon, radius_m, features, location, category,
-            user_gdf=None, user_filename=None, exposure=exposure, notice=notice,
+            user_gdf=None, user_filename=None, exposure=exposure,
+            notice=notice, boundary=boundary,
         )
         if user_summary and 'error' not in user_summary:
             user_summary['error'] = f"Could not render layer: {type(e).__name__}"
@@ -1941,6 +2295,12 @@ def analyze():
             k: v for k, v in exposure.items() if not k.startswith('_')
         }
 
+    # Surface boundary stats in the JSON response (strip internal GDFs)
+    if boundary is not None:
+        result['boundary'] = {
+            k: v for k, v in boundary.items() if not k.startswith('_')
+        }
+
     if include_pdf:
         # NEW in V2.5: generate the static cartographic map first,
         # embed it in the PDF, then clean up the temp file.
@@ -1948,7 +2308,7 @@ def analyze():
         try:
             static_map_path = generate_static_map(
                 lat, lon, radius_m, features, full_address, category,
-                user_gdf=user_gdf, exposure=exposure,
+                user_gdf=user_gdf, exposure=exposure, boundary=boundary,
             )
         except Exception as e:
             import traceback
@@ -1960,7 +2320,7 @@ def analyze():
                 full_address, category, radius_km, features,
                 user_summary=user_summary,
                 static_map_path=static_map_path,
-                exposure=exposure, notice=notice,
+                exposure=exposure, notice=notice, boundary=boundary,
             )
         finally:
             if static_map_path and os.path.exists(static_map_path):
@@ -2056,7 +2416,7 @@ def geoprocess_test():
 
 @app.route('/health', methods=['GET'])
 def health():
-    return jsonify({'status': 'ok', 'message': 'GIS Agent Backend running ✅ (V3.5d — Status column, Arabic-ready PDF, rebrand)'})
+    return jsonify({'status': 'ok', 'message': 'GIS Agent Backend running ✅ (V3.6 — within-boundary analysis)'})
 
 
 if __name__ == '__main__':
