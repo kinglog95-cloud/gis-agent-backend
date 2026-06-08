@@ -11,3 +11,5 @@ pyproj==3.6.1
 pandas==2.2.2
 matplotlib==3.9.2
 contextily==1.6.2
+arabic-reshaper==3.0.0
+python-bidi==0.4.2
