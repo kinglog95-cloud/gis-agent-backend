@@ -2702,8 +2702,13 @@ def tool_geocode():
     Response:
       { "success": true,
         "lat": 24.65, "lon": 46.74, "address": "...",
-        "candidates": [...]  // only if requested
+        "handle": "layer_N",       # a drawable 1-point layer for this place
+        "candidates": [...]        # only if requested
       }
+
+    The `handle` holds a single Point feature at the resolved location, so a
+    caller can draw the place on the map (role "points") for "show me / where
+    is X" questions — geocode alone otherwise returns only coordinates.
     """
     data = request.get_json(silent=True) or {}
     location = (data.get('location') or '').strip()
@@ -2713,6 +2718,15 @@ def tool_geocode():
     if not location:
         return jsonify({'success': False, 'error': 'location is required'}), 400
 
+    def _point_handle(lat, lon, label):
+        """Store a single-point FeatureCollection and return its handle."""
+        fc = {'type': 'FeatureCollection', 'features': [{
+            'type': 'Feature',
+            'geometry': {'type': 'Point', 'coordinates': [lon, lat]},
+            'properties': {'name': label, 'type': 'geocoded_place'}
+        }]}
+        return HANDLES.put(fc, f"location: {label}")
+
     if want_cands:
         cands = geocode_location(location, country_code=country,
                                  return_candidates=True)
@@ -2720,11 +2734,13 @@ def tool_geocode():
             return jsonify({'success': False,
                             'error': f"no match for: {location}"}), 404
         top = cands[0]
+        hid = _point_handle(top['lat'], top['lon'], top['address'] or location)
         return jsonify({
             'success':    True,
             'lat':        top['lat'],
             'lon':        top['lon'],
             'address':    top['address'],
+            'handle':     hid,
             'candidates': cands,
         })
 
@@ -2732,7 +2748,9 @@ def tool_geocode():
     if lat is None:
         return jsonify({'success': False,
                         'error': f"no match for: {location}"}), 404
-    return jsonify({'success': True, 'lat': lat, 'lon': lon, 'address': addr})
+    hid = _point_handle(lat, lon, addr or location)
+    return jsonify({'success': True, 'lat': lat, 'lon': lon, 'address': addr,
+                    'handle': hid})
 
 
 # ─── TOOL 2: fetch_osm ──────────────────────────────────────────────
@@ -3731,7 +3749,7 @@ def get_handle(hid):
 
 @app.route('/health', methods=['GET'])
 def health():
-    return jsonify({'status': 'ok', 'message': 'GIS Agent Backend running ✅ (V3.7i — inside-only subset handles for clean boundary maps)'})
+    return jsonify({'status': 'ok', 'message': 'GIS Agent Backend running ✅ (V3.7j — geocode returns a drawable point handle)'})
 
 
 if __name__ == '__main__':
